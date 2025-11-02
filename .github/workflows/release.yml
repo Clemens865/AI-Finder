@@ -1,0 +1,168 @@
+name: Release & Deploy
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Generate changelog from git log
+          echo "## What's Changed" > CHANGELOG.md
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:"* %s (%h)" >> CHANGELOG.md || echo "* Initial release" >> CHANGELOG.md
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          release_name: Intelligent Finder ${{ steps.get_version.outputs.version }}
+          body_path: CHANGELOG.md
+          draft: true
+          prerelease: false
+
+  build-and-release:
+    name: Build & Release - ${{ matrix.os }}
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            artifact_name: '*.AppImage'
+          - os: macos-latest
+            platform: mac
+            artifact_name: '*.dmg'
+          - os: windows-latest
+            platform: windows
+            artifact_name: '*.exe'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Code signing setup
+      - name: Import macOS certificate
+        if: matrix.os == 'macos-latest'
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERTIFICATE }}
+          p12-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+
+      - name: Setup Windows signing
+        if: matrix.os == 'windows-latest'
+        run: |
+          echo "${{ secrets.WINDOWS_CERTIFICATE }}" | base64 --decode > cert.pfx
+        shell: bash
+
+      # Build application with electron-builder
+      - name: Build Electron app (macOS)
+        if: matrix.os == 'macos-latest'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: npm run build:release -- --mac
+
+      - name: Build Electron app (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          CSC_LINK: cert.pfx
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: npm run build:release -- --win
+
+      - name: Build Electron app (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run build:release -- --linux
+
+      # Upload artifacts to release
+      - name: Upload Release Assets
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./dist/${{ matrix.artifact_name }}
+          asset_name: intelligent-finder-${{ needs.create-release.outputs.version }}-${{ matrix.platform }}
+          asset_content_type: application/octet-stream
+
+      # Upload to artifact storage for backup
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/
+          retention-days: 30
+
+  publish-release:
+    name: Publish Release
+    needs: [create-release, build-and-release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish Release
+        uses: eregon/publish-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          release_id: ${{ needs.create-release.outputs.upload_url }}
+
+  notify:
+    name: Notify Release
+    needs: [create-release, build-and-release, publish-release]
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - name: Send notification
+        run: |
+          echo "🎉 Release ${{ needs.create-release.outputs.version }} published successfully!"
+          # Add Slack/Discord/Email notification here if needed
+
+      - name: Update Claude-Flow memory
+        run: |
+          echo "RELEASE_VERSION=${{ needs.create-release.outputs.version }}" >> release.env
+          echo "RELEASE_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> release.env
