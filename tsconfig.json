@@ -35,7 +35,12 @@
       "@main/*": ["src/main/*"],
       "@renderer/*": ["src/renderer/*"],
       "@services/*": ["src/services/*"],
-      "@shared/*": ["src/shared/*"]
+      "@shared/*": ["src/shared/*"],
+      "@components/*": ["src/renderer/components/*"],
+      "@store/*": ["src/renderer/store/*"],
+      "@hooks/*": ["src/renderer/hooks/*"],
+      "@types/*": ["src/renderer/types/*"],
+      "@utils/*": ["src/renderer/utils/*"]
     }
   },
   "include": ["src/renderer/**/*", "src/shared/**/*"],
